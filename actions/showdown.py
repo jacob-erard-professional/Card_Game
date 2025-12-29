@@ -1,5 +1,70 @@
 from collections import Counter
 from models.card import Card, Rank, Suit
+from typing import Optional, Dict, Callable
+from models.game import PokerState
+
+
+class ShowdownManager:
+    """
+    Manages showdown logic including pot resolution and winner determination.
+    """
+    
+    def __init__(self, game: PokerState, action_providers: Optional[Dict] = None):
+        """
+        Initialize the ShowdownManager.
+        
+        Args:
+            game: The PokerState game object
+            action_providers: Optional dict for determining if console output should be printed
+        """
+        self.game = game
+        self.action_providers = action_providers
+    
+    def execute_showdown(self) -> list:
+        """
+        Resolve the showdown: determine winner(s) and award pot.
+
+        If only one non-folded player remains, award the entire pot to them.
+        Otherwise use the external `showdown` and `award_pot` helpers.
+        Returns list of winner Player objects.
+        """
+        # Active players who haven't folded
+        active_players = [p for p in self.game.players if not p.folded]
+
+        # If only one active player, award pot immediately
+        if len(active_players) == 1:
+            winner = active_players[0]
+            pot_total = self.game.pot.total()
+            if pot_total > 0:
+                try:
+                    self.game.pot.transfer_to(winner.chips, pot_total)
+                except Exception as e:
+                    print(f"Error awarding pot to Player {winner.player_num}: {e}")
+            if self.action_providers is None:
+                print(f"Player {winner.player_num} wins ${pot_total} (everyone else folded)")
+            return [winner]
+
+        # Multiple active players: check if we have enough cards to evaluate
+        total_cards = sum(len(p.hand) for p in active_players) + len(self.game.community_cards)
+        if total_cards < 5:
+            # Not enough cards for hand evaluation (cards haven't been dealt yet)
+            # Award pot equally to all active players
+            pot_total = self.game.pot.total()
+            share = pot_total // len(active_players)
+            remainder = pot_total % len(active_players)
+            for i, player in enumerate(active_players):
+                amount = share + (1 if i < remainder else 0)
+                if amount > 0:
+                    self.game.pot.transfer_to(player.chips, amount)
+            if self.action_providers is None:
+                print(f"Not enough cards for showdown; pot split among {len(active_players)} players")
+            return active_players
+
+        # Multiple active players: evaluate hands and award pot
+        ranked = showdown(self.game)
+        winners = award_pot(self.game, ranked)
+        return winners
+
 
 def showdown(game) -> list:
     """
@@ -56,7 +121,7 @@ def award_pot(game, ranked_results: list):
     for i, (player, hand_rank, hand_name_str) in enumerate(winners):
         amount = pot_share + (1 if i < remainder else 0)
         game.pot.transfer_to(player.chips, amount)
-        print(f"{player.name} wins ${amount} with {hand_name_str}")
+        print(f"Player {player.player_num} wins ${amount} with {hand_name_str}")
     
     return [player for player, _, _ in winners]
 

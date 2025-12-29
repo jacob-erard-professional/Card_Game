@@ -4,232 +4,133 @@ from models.game import PokerState
 from models.player import Player
 from typing import Callable, Dict, Optional
 import actions.dealing as dealing
-from actions.showdown import showdown, award_pot
+from actions.betting import BettingManager
+from actions.showdown import ShowdownManager
 
 
-def initialize_game(num_players, blind_amount, chip_breakdown, denominations) -> PokerState:
+class PokerEngine:
     """
-    Initialize a new poker game with players and chips.
+    Manages poker game flow including betting rounds, blinds, and player actions.
+    """
     
-    args:
-        num_players: int -> Initial number of player
-        blind_amount: int -> Amount to pay for blind
-        chip_breakdown: dict -> Map of chips amount to number of chips initially for each player
+    def __init__(self, num_players: int = 3, blind_amount: int = 20, chip_breakdown: Optional[dict] = None, denominations: Optional[list] = None):
+        """
+        Initialize a new poker game.
         
-    """
+        Args:
+            num_players: Number of players (default: 3)
+            blind_amount: Small blind amount (default: 20)
+            chip_breakdown: Dict mapping chip values to quantities (default: {5: 100, 25: 40, 100: 20})
+            denominations: List of chip denominations (default: [5, 25, 100])
+        """
+        if chip_breakdown is None:
+            chip_breakdown = {5: 100, 25: 40, 100: 20}
+        if denominations is None:
+            denominations = [5, 25, 100]
+        
+        self.chip_breakdown = chip_breakdown
+        self.game = self._initialize_game(num_players, blind_amount, chip_breakdown, denominations)
+        self.action_providers: Optional[Dict[int, Callable[[PokerState, Player], str]]] = None
+        self.betting_manager = BettingManager(self.game, self.action_providers)
+        self.showdown_manager = ShowdownManager(self.game, self.action_providers)
+        self.players_to_add = []
     
-    # Create players
-    players = []
-    for i in range(num_players):
-        player = Player(player_num=i, chips=ChipHolder(chip_breakdown))
-        players.append(player)
+    def set_action_providers(self, providers: Dict[int, Callable[[PokerState, Player], str]]):
+        """Set custom action providers for networked/AI play."""
+        self.action_providers = providers
+        self.betting_manager.action_providers = providers
+        self.showdown_manager.action_providers = providers
     
-    # Create the game state
-    game = PokerState(
-        blind_amount=blind_amount,
-        players=players,
-        community_cards=[],
-        burn_cards = [],
-        pot=ChipHolder(),
-        dealer_index=0,
-        current_player=1,
-        deck=Deck(),
-        phase="preflop"
-    )
+    def preflop_betting_round(self):
+        """Execute the preflop betting round with blinds."""
+        self.betting_manager.preflop_betting_round()
     
-    return game
+    def postflop_betting_round(self):
+        """Execute a postflop betting round (flop, turn, or river)."""
+        self.betting_manager.postflop_betting_round()
 
-def initial_betting_round(
-    game: PokerState,
-    action_providers: Optional[Dict[int, Callable[[PokerState, Player], str]]] = None,
-    ):
-    """
-    Run the initial (preflop) betting round.
+    def showdown(self) -> list:
+        """
+        Resolve the showdown: determine winner(s) and award pot.
+        Returns list of winner Player objects.
+        """
+        return self.showdown_manager.execute_showdown()
 
-    action_providers: optional mapping from player_num -> callable(game, player) -> action string.
-    If not provided, uses console input for local play. Actions supported:
-      - 'fold'
-      - 'check'
-      - 'call'
-      - 'raise <amount>'  (amount is integer extra on top of call)
-      - 'allin'
+    def next_round(self):
+        """
+        Prepare for the next round:
+        1. Clear all player hands
+        2. Reset folded status for all players
+        3. Remove players with no chips
+        4. Move dealer index to next player
+        5. Clear community cards and burn cards
+        """
+        # Use PokerState helpers to reset round state
+        self.game.reset_round_state()
 
-    The function is written so action collection can be swapped out for networked
-    providers that return the same action strings.
-    """
-    is_console = action_providers is None
+        # Eventually add players here for networked play
+
+        # Remove players with no chips and reindex
+        self.game.remove_broke_players()
+
+        # Advance dealer to next player
+        self.game.advance_dealer()
+
+    # No checks on the state of the game, perhaps something that needs to be done but probably not
+    def flop(self):
+        dealing.flop(self.game)
+        
+    def turn(self):
+        dealing.turn(self.game)
     
-    if action_providers is None:
-        def console_provider(g: PokerState, p: Player) -> str:
-            prompt = f"Player {p.player_num} (chips={p.chips.total()}, bet={p.bet}) action [fold/check/call/raise <amt>/allin]: "
-            return input(prompt).strip()
-
-        action_providers = {p.player_num: console_provider for p in game.players}
-
-    num_players = len(game.players)
-
-    # Reset bets for the round
-    for p in game.players:
-        p.bet = 0
-
-    # Post blinds (small and big)
-    small_idx = (game.dealer_index + 1) % num_players
-    big_idx = (game.dealer_index + 2) % num_players
-
-    def post_amount(player: Player, amount: int):
-        try:
-            player.chips.transfer_to(game.pot, amount)
-            player.bet += amount
-        except Exception:
-            # Player doesn't have enough for full amount -> push all they have
-            remaining = player.chips.total()
-            if remaining > 0:
-                player.chips.transfer_to(game.pot, remaining)
-                player.bet += remaining
-
-    post_amount(game.players[small_idx], game.blind_amount)
-    post_amount(game.players[big_idx], game.blind_amount * 2)
-
-    if is_console:
-        print(f"\n--- Blinds Posted ---")
-        print(f"Small blind (Player {small_idx}): {game.players[small_idx].bet}")
-        print(f"Big blind (Player {big_idx}): {game.players[big_idx].bet}")
-        print(f"Pot: {game.pot.total()}\n")
-
-    current_bet = max(p.bet for p in game.players)
-
-    # First to act is player after big blind
-    first_to_act = (big_idx + 1) % num_players
-
-    # Track last raiser to know when cycle completes
-    last_raiser = None
-
-    # Helper to determine active players count
-    def active_players():
-        return [p for p in game.players if not p.folded and (p.chips.total() > 0 or p.bet > 0)]
-
-    # If only one active player, betting ends
-    if len([p for p in game.players if not p.folded]) <= 1:
+    def river(self):
+        dealing.river(self.game)
+        
+    def deal(self):
+        dealing.deal(self.game)
+    
+    def add_player(self, name):
+        """
+        This is going to eventually be used for network play. The get_id function hasn't been implemented,
+        there needs to be a lock to prevent race conditions, and I didn't check if the chip_breakdown works
+        yet.
+        """
         return
-
-    idx = first_to_act
-    # Continue until all non-folded players have either matched current_bet or are all-in
-    while True:
-        player = game.players[idx]
-
-        # Skip folded or fully all-in players
-        if player.folded or player.chips.total() == 0:
-            idx = (idx + 1) % num_players
-            # check termination
-            if all((p.folded or p.chips.total() == 0 or p.bet == current_bet) for p in game.players if not p.folded):
-                break
-            if idx == first_to_act and last_raiser is None:
-                break
-            continue
-
-        # If player already matched current bet, they may check
-        provider = action_providers.get(player.player_num)
         
-        if is_console:
-            print(f"--- Player {idx} Action ---")
-            print(f"Pot: {game.pot.total()} | Current bet to match: {current_bet}")
-
-        # Keep prompting until valid action
-        action_valid = False
-        while not action_valid:
-            action = provider(game, player).lower()
-
-            if action.startswith('fold'):
-                player.folded = True
-                if is_console:
-                    print(f"Player {idx} folded\n")
-                action_valid = True
-            elif action.startswith('check'):
-                if player.bet != current_bet:
-                    # Can't check if you owe money
-                    if is_console:
-                        print(f"Invalid: cannot check when {current_bet - player.bet} chips are owed. Try 'call' or 'raise'.\n")
-                else:
-                    if is_console:
-                        print(f"Player {idx} checked\n")
-                    action_valid = True
-            elif action.startswith('call'):
-                amount_to_call = current_bet - player.bet
-                if amount_to_call > 0:
-                    post_amount(player, amount_to_call)
-                    if is_console:
-                        print(f"Player {idx} called {amount_to_call}")
-                        print(f"Pot: {game.pot.total()}\n")
-                else:
-                    if is_console:
-                        print(f"Player {idx} checked (call with no amount to match)\n")
-                action_valid = True
-            elif action.startswith('allin'):
-                amt = player.chips.total()
-                post_amount(player, amt)
-                if player.bet > current_bet:
-                    current_bet = player.bet
-                    last_raiser = idx
-                if is_console:
-                    print(f"Player {idx} went all-in for {amt}")
-                    print(f"Pot: {game.pot.total()}\n")
-                action_valid = True
-            elif action.startswith('raise'):
-                parts = action.split()
-                if len(parts) >= 2:
-                    try:
-                        raise_amt = int(parts[1])
-                    except ValueError:
-                        raise_amt = None
-                else:
-                    raise_amt = None
-
-                if raise_amt is None or raise_amt <= 0:
-                    if is_console:
-                        print(f"Invalid raise: must specify positive amount. Usage: 'raise <amount>'\n")
-                else:
-                    amount_to_call = current_bet - player.bet
-                    total_required = amount_to_call + raise_amt
-                    post_amount(player, total_required)
-                    if player.bet > current_bet:
-                        current_bet = player.bet
-                        last_raiser = idx
-                    if is_console:
-                        print(f"Player {idx} raised {total_required}")
-                        print(f"Pot: {game.pot.total()}\n")
-                    action_valid = True
-            else:
-                # Unrecognized action
-                if is_console:
-                    print(f"Invalid action. Valid actions: fold, check, call, raise <amount>, allin\n")
-
-        # Check for immediate end: only one non-folded player
-        if len([p for p in game.players if not p.folded]) == 1:
-            break
-
-        # Termination condition: all non-folded players have either matched current_bet or are all-in
-        if all((p.folded or p.bet == current_bet or p.chips.total() == 0) for p in game.players):
-            break
-
-        idx = (idx + 1) % num_players
-
-    # Betting round complete
-    if is_console:
-        print("--- Betting Round Complete ---")
-        for p in game.players:
-            status = "folded" if p.folded else f"in (bet: {p.bet}, remaining: {p.chips.total()})"
-            print(f"Player {p.player_num}: {status}")
-        print(f"Final Pot: {game.pot.total()}\n")
-
-
-def blind(game: PokerState):
-    # Post small blind only for compatibility if called directly
-    try:
-        game.players[(game.dealer_index + 1) % len(game.players)].chips.transfer_to(game.pot, game.blind_amount)
-        game.players[(game.dealer_index + 1) % len(game.players)].bet += game.blind_amount
-    except Exception:
-        remaining = game.players[(game.dealer_index + 1) % len(game.players)].chips.total()
-        if remaining > 0:
-            game.players[(game.dealer_index + 1) % len(game.players)].chips.transfer_to(game.pot, remaining)
-            game.players[(game.dealer_index + 1) % len(game.players)].bet += remaining
+        
+            
+        
+    # ========== Private/Internal Methods ==========
     
+    def _initialize_game(self, num_players: int, blind_amount: int, 
+                        chip_breakdown: dict, denominations: list) -> PokerState:
+        """Create and initialize the game state."""
+        players = []
+        for i in range(num_players):
+            player = Player(player_num=i, chips=ChipHolder(chip_breakdown))
+            players.append(player)
+        
+        game = PokerState(
+            blind_amount=blind_amount,
+            players=players,
+            community_cards=[],
+            burn_cards=[],
+            pot=ChipHolder(),
+            dealer_index=0,
+            current_player=1,
+            deck=Deck(),
+            phase="preflop"
+        )
+        
+        return game
+
+# Standalone function for custom initialization if needed
+def initialize_game(num_players: int, blind_amount: int, 
+                   chip_breakdown: dict, denominations: list) -> PokerState:
+    """
+    Lightweight wrapper that returns a `PokerState` using `PokerEngine`.
+    Keeps the old function API but avoids duplicating initialization logic.
+    """
+    pe = PokerEngine(num_players=num_players, blind_amount=blind_amount,
+                     chip_breakdown=chip_breakdown, denominations=denominations)
+    return pe.game
