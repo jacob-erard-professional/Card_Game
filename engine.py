@@ -41,6 +41,19 @@ class PokerEngine:
         self.betting_manager.action_providers = providers
         self.showdown_manager.action_providers = providers
     
+    def add_action_provider(self, player_num: int, provider: Callable[[PokerState, Player], str]):
+        """Add or update an action provider for a specific player.
+
+        Args:
+            player_num: The player number to add/update
+            provider: A callable that takes (game: PokerState, player: Player) and returns an action string
+        """
+        if self.action_providers is None:
+            self.action_providers = {}
+        self.action_providers[player_num] = provider
+        self.betting_manager.action_providers = self.action_providers
+        self.showdown_manager.action_providers = self.action_providers
+    
     def preflop_betting_round(self):
         """Execute the preflop betting round with blinds."""
         self.betting_manager.preflop_betting_round()

@@ -27,6 +27,24 @@ class Rank(Enum):
 class Card:
     rank: Rank
     suit: Suit
+    def __repr__(self) -> str:
+        """Return a compact human-friendly representation like 'A♥' or '10♦'."""
+        suit_symbols = {
+            Suit.HEARTS: '♥',
+            Suit.DIAMONDS: '♦',
+            Suit.CLUBS: '♣',
+            Suit.SPADES: '♠',
+        }
+
+        rank_names = {
+            Rank.ACE: 'A',
+            Rank.KING: 'K',
+            Rank.QUEEN: 'Q',
+            Rank.JACK: 'J',
+        }
+
+        rank_str = rank_names.get(self.rank, str(self.rank.value))
+        return f"{rank_str}{suit_symbols.get(self.suit, self.suit.value)}"
 
 
 class Deck:
