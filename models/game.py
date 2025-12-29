@@ -5,6 +5,8 @@ from models.chip import ChipHolder
 
 @dataclass
 class PokerState:
+    blind: int = 0
+    blind_amount: int
     players: list[Player]
     community_cards: list[Card]
     burn_cards: list[Card]

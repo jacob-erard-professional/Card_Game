@@ -6,7 +6,7 @@ import actions.dealing as dealing
 from actions.showdown import showdown, award_pot
 
 
-def initialize_game(num_players, chip_breakdown: ChipHolder) -> PokerState:
+def initialize_game(num_players, blind_amount, chip_breakdown: ChipHolder) -> PokerState:
     """Initialize a new poker game with players and chips."""
     
     # Create players
@@ -17,6 +17,7 @@ def initialize_game(num_players, chip_breakdown: ChipHolder) -> PokerState:
     
     # Create the game state
     game = PokerState(
+        blind_amount=blind_amount,
         players=players,
         community_cards=[],
         burn_cards = [],
@@ -28,3 +29,7 @@ def initialize_game(num_players, chip_breakdown: ChipHolder) -> PokerState:
     )
     
     return game
+
+def initial_betting_round(game: PokerState):
+    
+    
