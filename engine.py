@@ -22,6 +22,9 @@ class PokerEngine:
             blind_amount: Small blind amount (default: 20)
             chip_breakdown: Dict mapping chip values to quantities (default: {5: 100, 25: 40, 100: 20})
             denominations: List of chip denominations (default: [5, 25, 100])
+            
+            
+        TODO Denominations needs to be used more than it is now. For future implementation with real players
         """
         if chip_breakdown is None:
             chip_breakdown = {5: 100, 25: 40, 100: 20}
