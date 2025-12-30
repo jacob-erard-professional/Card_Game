@@ -43,6 +43,7 @@ class PokerState:
         self.reset_bets()
         self.community_cards = []
         self.burn_cards = []
+        self.deck = Deck()
 
     def remove_broke_players(self) -> None:
         """Remove players who have no chips left from the game and reindex players.

@@ -30,7 +30,7 @@ class BettingManager:
         big_blind_idx = (self.game.dealer_index + 2) % num_players
         first_to_act = (big_blind_idx + 1) % num_players
         
-        self._betting_round(first_to_act)
+        return self._betting_round(first_to_act)
     
     def postflop_betting_round(self):
         """Execute a postflop betting round (flop, turn, or river)."""
@@ -40,7 +40,7 @@ class BettingManager:
         
         # First to act is left of dealer
         first_to_act = (self.game.dealer_index + 1) % len(self.game.players)
-        self._betting_round(first_to_act)
+        return self._betting_round(first_to_act)
     
     # ========== Private/Internal Methods ==========
     
@@ -96,6 +96,31 @@ class BettingManager:
             status = "folded" if p.folded else f"in (bet: {p.bet}, remaining: {p.chips.total()})"
             print(f"Player {p.player_num}: {status}")
         print(f"Final Pot: {self.game.pot.total()}\n")
+
+    def _award_to_last_standing(self, is_console: bool):
+        """If only one non-folded player remains, award the pot to them and return the winner.
+
+        Returns the winner Player or None.
+        """
+        active_players = [p for p in self.game.players if not p.folded]
+        if len(active_players) != 1:
+            return None
+
+        winner = active_players[0]
+        pot_total = self.game.pot.total()
+        if pot_total > 0:
+            try:
+                self.game.pot.transfer_to(winner.chips, pot_total)
+            except Exception as e:
+                print(f"Error awarding pot to Player {winner.player_num}: {e}")
+
+        # Mark pot as awarded to prevent duplicate awarding elsewhere
+        setattr(self.game, '_pot_awarded', True)
+
+        # Always print the winner, regardless of console/AI mode
+        print(f"Player {winner.player_num} wins ${pot_total} (everyone else folded)")
+
+        return winner
     
     def _process_fold(self, player: Player, player_idx: int, is_console: bool) -> bool:
         """Process a fold action. Returns True if action is valid."""
@@ -243,9 +268,12 @@ class BettingManager:
         active_with_chips = [p for p in self.game.players 
                             if not p.folded and p.chips.total() > 0]
         if len(active_with_chips) <= 1:
-            if is_console:
-                self._print_round_summary()
-            return
+            # If only one player can act (everyone else folded/all-in), award pot
+            winner = self._award_to_last_standing(is_console)
+            if winner is None:
+                if is_console:
+                    self._print_round_summary()
+            return winner
         
         # Track who has acted this round
         has_acted = {i: False for i in range(num_players)}
@@ -253,6 +281,7 @@ class BettingManager:
         
         idx = starting_player_idx
         
+        winner = None
         while True:
             player = self.game.players[idx]
             
@@ -298,6 +327,7 @@ class BettingManager:
             
             # Check for immediate end: only one non-folded player
             if len(self._get_active_players()) <= 1:
+                winner = self._award_to_last_standing(is_console)
                 break
             
             # Check termination: everyone has acted and matched the bet (or folded/all-in)
@@ -314,6 +344,8 @@ class BettingManager:
         
         if is_console:
             self._print_round_summary()
+
+        return winner
     
     def _get_providers(self) -> Dict[int, Callable[[PokerState, Player], str]]:
         """Get action providers, defaulting to console if not set."""

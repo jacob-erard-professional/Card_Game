@@ -34,6 +34,10 @@ class ShowdownManager:
         # If only one active player, award pot immediately
         if len(active_players) == 1:
             winner = active_players[0]
+            # If pot was already awarded earlier (e.g., during betting), skip re-awarding/printing
+            if getattr(self.game, '_pot_awarded', False):
+                return [winner]
+
             pot_total = self.game.pot.total()
             if pot_total > 0:
                 try:

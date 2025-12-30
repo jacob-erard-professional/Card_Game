@@ -27,6 +27,8 @@ class PokerEngine:
             chip_breakdown = {5: 100, 25: 40, 100: 20}
         if denominations is None:
             denominations = [5, 25, 100]
+        if num_players > 22:
+            raise ValueError('Too many players')
         
         self.chip_breakdown = chip_breakdown
         self.game = self._initialize_game(num_players, blind_amount, chip_breakdown, denominations)
@@ -41,6 +43,17 @@ class PokerEngine:
         self.betting_manager.action_providers = providers
         self.showdown_manager.action_providers = providers
     
+    def set_global_action_provider(self, provider: Callable[[PokerState, Player], str]):
+        """Set the same action provider for all players.
+
+        Avoids concurrent modification by creating a fresh dict each time.
+
+        Args:
+            provider: A callable that takes (game: PokerState, player: Player) and returns an action string
+        """
+        providers = {p.player_num: provider for p in self.game.players}
+        self.set_action_providers(providers)
+    
     def add_action_provider(self, player_num: int, provider: Callable[[PokerState, Player], str]):
         """Add or update an action provider for a specific player.
 
@@ -51,16 +64,78 @@ class PokerEngine:
         if self.action_providers is None:
             self.action_providers = {}
         self.action_providers[player_num] = provider
+        # Sync with managers
         self.betting_manager.action_providers = self.action_providers
         self.showdown_manager.action_providers = self.action_providers
     
+    def set_player_action_provider(self, player_num: int, provider: Callable[[PokerState, Player], str]):
+        """Set (or change) the action provider for a specific player.
+
+        Alias for add_action_provider with a clearer semantic name.
+
+        Args:
+            player_num: The player number to set
+            provider: A callable that takes (game: PokerState, player: Player) and returns an action string
+        """
+        self.add_action_provider(player_num, provider)
+    
     def preflop_betting_round(self):
-        """Execute the preflop betting round with blinds."""
-        self.betting_manager.preflop_betting_round()
+        """Execute the preflop betting round with blinds.
+
+        Returns the winning Player if the pot was awarded during the round, otherwise None.
+        """
+        return self.betting_manager.preflop_betting_round()
     
     def postflop_betting_round(self):
-        """Execute a postflop betting round (flop, turn, or river)."""
-        self.betting_manager.postflop_betting_round()
+        """Execute a postflop betting round (flop, turn, or river).
+
+        Returns the winning Player if the pot was awarded during the round, otherwise None.
+        """
+        return self.betting_manager.postflop_betting_round()
+
+    def run(self):
+        """Run a full hand (deal, betting rounds, community cards, showdown, cleanup).
+
+        Returns list of winner Player objects (one or many if split pot).
+        """
+        # Deal hole cards and run preflop betting
+        self.deal()
+        winner = self.preflop_betting_round()
+        if winner is not None:
+            winners = [winner]
+            self.next_round()
+            return winners
+
+        # Flop
+        self.flop()
+        winner = self.postflop_betting_round()
+        if winner is not None:
+            winners = [winner]
+            self.next_round()
+            return winners
+
+        # Turn
+        self.turn()
+        winner = self.postflop_betting_round()
+        if winner is not None:
+            winners = [winner]
+            self.next_round()
+            return winners
+
+        # River
+        self.river()
+        winner = self.postflop_betting_round()
+        if winner is not None:
+            winners = [winner]
+            self.next_round()
+            return winners
+
+        # Showdown
+        winners = self.showdown()
+
+        # Prepare for next round
+        self.next_round()
+        return winners
 
     def showdown(self) -> list:
         """
@@ -77,6 +152,7 @@ class PokerEngine:
         3. Remove players with no chips
         4. Move dealer index to next player
         5. Clear community cards and burn cards
+        6. Reshuffle deck if needed
         """
         # Use PokerState helpers to reset round state
         self.game.reset_round_state()
@@ -88,6 +164,10 @@ class PokerEngine:
 
         # Advance dealer to next player
         self.game.advance_dealer()
+
+        # Reshuffle deck if it's getting low (fewer than 20 cards left)
+        if len(self.game.deck.cards) < 20:
+            self.game.deck = Deck()
 
     # No checks on the state of the game, perhaps something that needs to be done but probably not
     def flop(self):
