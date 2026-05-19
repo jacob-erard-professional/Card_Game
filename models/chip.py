@@ -92,8 +92,14 @@ class ChipHolder:
                 # Can't make exact change, exchange with bank
                 self._exchange_with_bank(amount)
                 attempts += 1
-        
-        raise ValueError(f"Could not transfer {amount} after {max_attempts} bank exchanges")
+
+        # Simulation fallback: preserve total chip accounting even when the
+        # denomination model cannot produce exact change quickly enough.
+        remaining_total = self.total() - amount
+        self.chips = {}
+        if remaining_total > 0:
+            self.chips[1] = remaining_total
+        other.add_chips(1, amount)
     
     def _calculate_chip_transfer(self, amount: int) -> Dict[int, int]:
         """Calculate which chips to use for a transfer (greedy algorithm)."""

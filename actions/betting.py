@@ -53,6 +53,8 @@ class BettingManager:
             try:
                 player.chips.transfer_to(self.game.pot, actual_amount)
                 player.bet += actual_amount
+                player.committed += actual_amount
+                player.all_in = player.chips.total() == 0
             except Exception as e:
                 print(f"Error transferring chips: {e}")
     

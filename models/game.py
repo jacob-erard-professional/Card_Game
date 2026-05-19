@@ -24,7 +24,7 @@ class PokerState:
 
     def active_with_chips(self) -> List[Player]:
         """Return list of players who have not folded and have chips remaining."""
-        return [p for p in self.players if not p.folded and p.chips.total() > 0]
+        return [p for p in self.players if not p.folded and not p.all_in and p.chips.total() > 0]
 
     def reset_bets(self) -> None:
         """Reset the `bet` field on all players to zero."""
@@ -40,10 +40,15 @@ class PokerState:
         for p in self.players:
             p.hand = []
             p.folded = False
+            p.committed = 0
+            p.all_in = False
         self.reset_bets()
         self.community_cards = []
         self.burn_cards = []
+        self.pot = ChipHolder(denominations=self.pot.denominations)
         self.deck = Deck()
+        if hasattr(self, "_pot_awarded"):
+            delattr(self, "_pot_awarded")
 
     def remove_broke_players(self) -> None:
         """Remove players who have no chips left from the game and reindex players.
@@ -73,4 +78,3 @@ class PokerState:
     def pot_total(self) -> int:
         """Return the total chips currently in the pot."""
         return self.pot.total()
-

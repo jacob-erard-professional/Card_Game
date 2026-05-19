@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RL Poker Room</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="room">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Heads-up no-limit hold'em</p>
+          <h1>RL Poker Room</h1>
+        </div>
+        <div class="status-strip">
+          <span id="modelStatus">Policy loading</span>
+          <button id="newHand" class="ghost-button">New Hand</button>
+        </div>
+      </header>
+
+      <section class="table-stage" aria-label="Poker table">
+        <div class="table">
+          <div class="rail rail-outer"></div>
+          <div class="rail rail-inner"></div>
+          <div class="deck" id="deck" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+
+          <div class="seat opponent" id="seat-1">
+            <div class="speech speech-opponent" id="speech-1" aria-live="polite"></div>
+            <div class="seat-meta">
+              <span class="name">RL Model</span>
+              <span class="stack" id="stack-1">$0</span>
+            </div>
+            <div class="cards" id="hand-1"></div>
+            <div class="bet" id="bet-1">$0</div>
+          </div>
+
+          <div class="board">
+            <div class="community" id="community"></div>
+            <div class="table-info">
+              <div class="phase" id="phase">Preflop</div>
+              <div class="pot">
+                <span>Pot</span>
+                <strong id="pot">$0</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="seat human active" id="seat-0">
+            <div class="bet" id="bet-0">$0</div>
+            <div class="cards" id="hand-0"></div>
+            <div class="speech speech-human" id="speech-0" aria-live="polite"></div>
+            <div class="seat-meta">
+              <span class="name">You</span>
+              <span class="stack" id="stack-0">$0</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="console">
+        <div class="hand-status">
+          <span id="turnStatus">Waiting for state</span>
+          <span id="deltaStatus"></span>
+        </div>
+        <div class="actions" id="actions"></div>
+        <div class="bet-builder" id="betBuilder" hidden>
+          <label for="raiseAmount">Raise to</label>
+          <input id="raiseAmount" type="number" inputmode="numeric" step="1">
+          <button id="halfPot">Half Pot</button>
+          <button id="potBet">Pot</button>
+          <button id="maxBet">Max</button>
+          <button id="submitRaise" class="primary">Raise</button>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

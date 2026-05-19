@@ -10,3 +10,5 @@ class Player:
     hand: list[Card] = field(default_factory=list)
     folded: bool = False
     bet: int = 0
+    committed: int = 0
+    all_in: bool = False

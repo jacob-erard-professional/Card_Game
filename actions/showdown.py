@@ -103,7 +103,7 @@ def showdown(game) -> list:
 def award_pot(game, ranked_results: list):
     """
     Award the pot to the winner(s) based on showdown results.
-    Handles split pots for ties.
+    Handles split pots for ties and side pots for all-in players.
     
     Args:
         game: PokerState object
@@ -111,23 +111,69 @@ def award_pot(game, ranked_results: list):
     """
     if not ranked_results:
         raise ValueError("No players to award pot to")
-    
-    # Find all players with the best hand (in case of tie)
+
+    committed = {p.player_num: getattr(p, "committed", 0) for p in game.players}
+    if sum(committed.values()) <= 0:
+        return _award_single_pot(game, ranked_results, game.pot.total())
+
+    rank_by_player = {player.player_num: (player, hand_rank, hand_name_str)
+                      for player, hand_rank, hand_name_str in ranked_results}
+    levels = sorted({amount for amount in committed.values() if amount > 0})
+    previous = 0
+    all_winner_nums = []
+
+    for level in levels:
+        contributors = [p for p in game.players if committed[p.player_num] >= level]
+        pot_amount = (level - previous) * len(contributors)
+        previous = level
+
+        eligible = [p for p in contributors if not p.folded and p.player_num in rank_by_player]
+        if not eligible or pot_amount <= 0:
+            continue
+
+        remaining_pot = game.pot.total()
+        if remaining_pot <= 0:
+            break
+        pot_amount = min(pot_amount, remaining_pot)
+
+        best_rank = max(rank_by_player[p.player_num][1] for p in eligible)
+        winners = [rank_by_player[p.player_num] for p in eligible
+                   if rank_by_player[p.player_num][1] == best_rank]
+        all_winner_nums.extend(player.player_num for player, _, _ in winners)
+        _pay_winners(game, winners, pot_amount)
+
+    if game.pot.total() > 0:
+        # Defensive fallback for legacy states where committed chips do not exactly
+        # describe the pot. Award the residual to the best active ranked hand.
+        _award_single_pot(game, ranked_results, game.pot.total())
+
+    seen = set()
+    ordered_winners = []
+    for player, _, _ in ranked_results:
+        if player.player_num in all_winner_nums and player.player_num not in seen:
+            ordered_winners.append(player)
+            seen.add(player.player_num)
+    return ordered_winners or [ranked_results[0][0]]
+
+
+def _award_single_pot(game, ranked_results: list, pot_total: int):
     best_hand_rank = ranked_results[0][1]
     winners = [result for result in ranked_results if result[1] == best_hand_rank]
-    
-    # Calculate pot share
-    pot_total = game.pot.total()
+    _pay_winners(game, winners, pot_total)
+    return [player for player, _, _ in winners]
+
+
+def _pay_winners(game, winners: list, pot_total: int) -> None:
+    if pot_total <= 0:
+        return
+
     pot_share = pot_total // len(winners)
     remainder = pot_total % len(winners)
-    
-    # Award chips to winners
+
     for i, (player, hand_rank, hand_name_str) in enumerate(winners):
         amount = pot_share + (1 if i < remainder else 0)
         game.pot.transfer_to(player.chips, amount)
         print(f"Player {player.player_num} wins ${amount} with {hand_name_str}")
-    
-    return [player for player, _, _ in winners]
 
 def evaluate_hand(cards: list[Card]) -> tuple:
     """
@@ -245,5 +291,4 @@ def hand_name(hand_rank: tuple) -> str:
     }
     
     return names.get(hand_type, "Unknown")
-
 

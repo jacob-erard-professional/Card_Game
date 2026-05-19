@@ -1,6 +1,7 @@
 from models.player import Player
 from models.game import PokerState
 import random
+from actions.action import ActionType
 
 def call_AP(game: PokerState, player: Player) -> str:
     return 'call'
@@ -12,6 +13,18 @@ def allin_AP(game:PokerState, player:Player)-> str:
     return 'allin'
 
 def random_choice_AP(game:PokerState, player:Player)-> str:
+    engine = getattr(game, "_engine", None)
+    if engine is not None:
+        legal = engine.legal_actions(player.player_num)
+        if legal:
+            checks_or_calls = [a for a in legal if a.action_type in (ActionType.CHECK, ActionType.CALL)]
+            raises = [a for a in legal if a.action_type == ActionType.RAISE]
+            weighted = []
+            weighted.extend(checks_or_calls * 5)
+            weighted.extend(raises * 3)
+            weighted.extend([a for a in legal if a.action_type == ActionType.ALL_IN])
+            weighted.extend([a for a in legal if a.action_type == ActionType.FOLD])
+            return random.choice(weighted or legal)
     
     current_bet = max((p.bet for p in game.players), default=0)
     amount_to_call = current_bet - player.bet
