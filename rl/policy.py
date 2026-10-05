@@ -1,31 +1,55 @@
+"""Load a trained average policy and play it through the engine."""
 from __future__ import annotations
 
-from rl.actions import ACTION_COUNT, action_from_index
-from rl.dqn import DQN, select_action, torch
-from rl.encoding import observation_size, observation_vector
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from actions.action import Action
+from rl.actions import action_from_index, legal_action_mask
+from rl.encoding import observation_vector
+from rl.nfsp import masked_logits, mlp
+
+CHECKPOINT_DIR = Path(__file__).resolve().parent / "checkpoints"
 
 
-def load_policy(model_path: str, input_size: int) -> DQN:
-    if torch is None:
-        raise ImportError("PyTorch is required to load an RL policy. Install torch first.")
-    model = DQN(input_size=input_size, output_size=ACTION_COUNT)
-    state = torch.load(model_path, map_location="cpu")
-    model.load_state_dict(state)
-    model.eval()
-    return model
+def checkpoint_path(num_players: int) -> Path:
+    return CHECKPOINT_DIR / f"rl_{num_players}p.pt"
 
 
-def make_rl_action_provider(model_path: str, deterministic: bool = True, max_players: int = 6):
-    """Create a PokerEngine-compatible provider backed by a trained DQN."""
-    model = load_policy(model_path, observation_size(max_players))
+class PolicyBot:
+    """The deployable NFSP average policy for one table size. Samples its actions, so it mixes.
 
-    def provider(game, player) -> str:
-        engine = getattr(game, "_engine", None)
-        if engine is None:
-            raise RuntimeError("RL provider requires PokerEngine to attach itself to PokerState")
-        state = observation_vector(engine, player.player_num, max_players)
-        mask = engine.legal_action_mask(player.player_num)
-        action_idx = select_action(model, state, mask, epsilon=0.0 if deterministic else 0.05)
-        return action_from_index(engine, action_idx)
+    It can also play smaller tables than it trained for; missing seats look like busted players.
+    """
 
-    return provider
+    def __init__(self, network: torch.nn.Module, num_players: int, payouts: list[float], seed: int | None = None):
+        self.network = network.eval()
+        self.num_players = num_players
+        self.payouts = payouts
+        self.rng = np.random.default_rng(seed)
+
+    @classmethod
+    def load(cls, path: str | Path, seed: int | None = None) -> "PolicyBot":
+        checkpoint = torch.load(path, map_location="cpu")
+        meta = checkpoint["meta"]
+        network = mlp(meta["obs_size"], meta["hidden"])
+        network.load_state_dict(checkpoint["policy"])
+        return cls(network, meta["num_players"], meta["payouts"], seed)
+
+    def action_probabilities(self, engine, seat: int) -> np.ndarray:
+        obs = torch.from_numpy(observation_vector(engine, seat, self.payouts, self.num_players)).unsqueeze(0)
+        mask = torch.from_numpy(legal_action_mask(engine)).unsqueeze(0)
+        with torch.no_grad():
+            return F.softmax(masked_logits(self.network(obs), mask), dim=1)[0].numpy()
+
+    def act(self, engine, seat: int) -> Action:
+        probs = self.action_probabilities(engine, seat)
+        index = int(self.rng.choice(len(probs), p=probs / probs.sum()))
+        return action_from_index(engine, index)
+
+    def __call__(self, engine, player) -> Action:
+        """Use the bot directly as an engine action provider."""
+        return self.act(engine, player.seat)

@@ -40,3 +40,10 @@ coverage.xml
 .idea/
 *.sublime-project
 *.sublime-workspace
+
+# Local virtualenv
+.venv/
+
+# Full RL training state (optimizers, target nets); only rl_<n>p.pt policies are committed
+rl/checkpoints/*.train.pt
+rl/checkpoints/*.log

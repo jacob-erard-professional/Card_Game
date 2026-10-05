@@ -7,6 +7,31 @@
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
+    <div class="scene" id="scene" role="img" aria-label="A 3D poker room: you face the RL robot across the table"></div>
+
+    <div class="hud">
+      <div class="anchor" data-anchor="plate-1" data-pin>
+        <div class="seat-meta" id="plate-1"><span class="name">RL Model</span><span class="stack" id="stack-1">$0</span></div>
+      </div>
+      <div class="anchor start" data-anchor="speech-1" data-pin><div class="speech" id="speech-1" aria-live="polite"></div></div>
+      <div class="anchor" data-anchor="label-1"><div class="hand-label" id="label-1"></div></div>
+      <div class="anchor" data-anchor="bet-1"><div class="pill empty" id="bet-1"><span id="betAmt-1">$0</span></div></div>
+
+      <div class="anchor" data-anchor="phase">
+        <div class="phase-pill"><span id="phase">Preflop</span> · <span id="blinds">Blinds $0/$0</span></div>
+      </div>
+      <div class="anchor" data-anchor="pot"><div class="pill pot-pill empty" id="potLabel"><span>Pot</span><strong id="pot">$0</strong></div></div>
+
+      <div class="anchor" data-anchor="bet-0"><div class="pill empty" id="bet-0"><span id="betAmt-0">$0</span></div></div>
+      <div class="anchor start" data-anchor="speech-0"><div class="speech" id="speech-0" aria-live="polite"></div></div>
+      <div class="anchor" data-anchor="plate-0">
+        <div class="seat-column">
+          <div class="hand-label" id="label-0"></div>
+          <div class="seat-meta" id="plate-0"><span class="name">You</span><span class="stack" id="stack-0">$0</span></div>
+        </div>
+      </div>
+    </div>
+
     <main class="room">
       <header class="topbar">
         <div>
@@ -15,69 +40,70 @@
         </div>
         <div class="status-strip">
           <span id="modelStatus">Policy loading</span>
-          <button id="newHand" class="ghost-button">New Hand</button>
+          <button id="viewToggle" class="ghost-button" title="Look straight down at the cards">Bird's-eye <kbd>V</kbd></button>
+          <button id="logToggle" class="ghost-button" aria-expanded="false" aria-controls="drawer">Hand log</button>
+          <button id="newMatch" class="ghost-button">New match</button>
         </div>
       </header>
 
-      <section class="table-stage" aria-label="Poker table">
-        <div class="table">
-          <div class="rail rail-outer"></div>
-          <div class="rail rail-inner"></div>
-          <div class="deck" id="deck" aria-hidden="true">
-            <span></span>
-            <span></span>
-            <span></span>
-          </div>
-
-          <div class="seat opponent" id="seat-1">
-            <div class="speech speech-opponent" id="speech-1" aria-live="polite"></div>
-            <div class="seat-meta">
-              <span class="name">RL Model</span>
-              <span class="stack" id="stack-1">$0</span>
-            </div>
-            <div class="cards" id="hand-1"></div>
-            <div class="bet" id="bet-1">$0</div>
-          </div>
-
-          <div class="board">
-            <div class="community" id="community"></div>
-            <div class="table-info">
-              <div class="phase" id="phase">Preflop</div>
-              <div class="pot">
-                <span>Pot</span>
-                <strong id="pot">$0</strong>
-              </div>
-            </div>
-          </div>
-
-          <div class="seat human active" id="seat-0">
-            <div class="bet" id="bet-0">$0</div>
-            <div class="cards" id="hand-0"></div>
-            <div class="speech speech-human" id="speech-0" aria-live="polite"></div>
-            <div class="seat-meta">
-              <span class="name">You</span>
-              <span class="stack" id="stack-0">$0</span>
-            </div>
-          </div>
+      <div class="win-banner" id="winBanner" role="status" aria-live="assertive" hidden>
+        <p class="win-eyebrow" id="winEyebrow"></p>
+        <h2 id="winTitle"></h2>
+        <div class="win-amount" id="winAmount"></div>
+        <div class="win-hand" id="winHand"></div>
+        <div class="win-cards" id="winCards"></div>
+        <div class="win-vs" id="winVs" hidden>
+          <span id="winVsLabel"></span>
+          <div class="win-cards" id="winVsCards"></div>
         </div>
-      </section>
+      </div>
 
-      <section class="console">
-        <div class="hand-status">
+      <section class="dock" aria-label="Your actions">
+        <div class="dock-status" id="dockStatus" hidden>
           <span id="turnStatus">Waiting for state</span>
           <span id="deltaStatus"></span>
         </div>
-        <div class="actions" id="actions"></div>
-        <div class="bet-builder" id="betBuilder" hidden>
-          <label for="raiseAmount">Raise to</label>
-          <input id="raiseAmount" type="number" inputmode="numeric" step="1">
-          <button id="halfPot">Half Pot</button>
-          <button id="potBet">Pot</button>
-          <button id="maxBet">Max</button>
-          <button id="submitRaise" class="primary">Raise</button>
+
+        <div class="raise-tray" id="raiseTray" hidden>
+          <div class="raise-readout">
+            <span>Raise to</span>
+            <strong id="raiseAmount">$0</strong>
+          </div>
+          <input id="raiseSlider" type="range" aria-label="Raise amount">
+          <div class="presets" id="presets">
+            <button data-preset="min">Min</button>
+            <button data-preset="half">½ Pot</button>
+            <button data-preset="pot">Pot</button>
+            <button data-preset="max">All in</button>
+          </div>
+          <div class="tray-actions">
+            <button id="cancelRaise" class="tray-cancel" aria-label="Close raise">Cancel <kbd>Esc</kbd></button>
+            <button id="confirmRaise" class="action action-raise">Raise <kbd>↵</kbd></button>
+          </div>
         </div>
+
+        <div class="dock-actions" id="dockActions"></div>
       </section>
     </main>
-    <script src="/static/app.js"></script>
+
+    <aside class="drawer" id="drawer" aria-label="Hand log" hidden>
+      <header class="drawer-head">
+        <h2>Hand log</h2>
+        <button id="logClose" class="ghost-button" aria-label="Close hand log">Close</button>
+      </header>
+      <section>
+        <h3 id="currentHandTitle">This hand</h3>
+        <ol class="log" id="currentLog"></ol>
+      </section>
+      <section>
+        <h3>Previous hands</h3>
+        <div class="history" id="history"></div>
+      </section>
+    </aside>
+
+    <script type="importmap">
+      { "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.170.0/three.module.min.js" } }
+    </script>
+    <script type="module" src="/static/app.js"></script>
   </body>
 </html>

@@ -1,10 +1,13 @@
+import logging
+
 from engine import PokerEngine
-from AP.action_providers import call_AP, fold_AP, allin_AP, random_choice_AP
+from providers import random_choice_provider
 
-# Simple initialization with defaults
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-
+game = PokerEngine(num_players=22)
+game.set_global_action_provider(random_choice_provider)
 for _ in range(100):
-    game = PokerEngine(num_players=22)
-    game.set_global_action_provider(random_choice_AP)
+    if len(game.game.players_with_chips()) < 2:
+        break
     game.run()

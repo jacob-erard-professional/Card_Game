@@ -32,6 +32,7 @@ class Action:
 
     @classmethod
     def raise_to(cls, total_bet: int) -> "Action":
+        """Raise so the player's total bet for the street becomes `total_bet`."""
         return cls(ActionType.RAISE, total_bet)
 
     @classmethod
@@ -40,6 +41,7 @@ class Action:
 
 
 def parse_action(value: str | Action) -> Action:
+    """Parse 'fold', 'check', 'call', 'allin' or 'raise <total>' (a raise-to amount)."""
     if isinstance(value, Action):
         return value
 
@@ -58,7 +60,7 @@ def parse_action(value: str | Action) -> Action:
         return Action.all_in()
     if name == "raise":
         if len(parts) != 2:
-            raise ValueError("Raise action must be formatted as 'raise <amount>'")
+            raise ValueError("Raise action must be formatted as 'raise <total>'")
         try:
             amount = int(parts[1])
         except ValueError as exc:

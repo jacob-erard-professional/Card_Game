@@ -1,294 +1,202 @@
+import logging
 from collections import Counter
-from models.card import Card, Rank, Suit
-from typing import Optional, Dict, Callable
+from itertools import combinations
+
+from models.card import Card
 from models.game import PokerState
+from models.player import Player
+
+logger = logging.getLogger(__name__)
 
 
-class ShowdownManager:
+def award_pot(game: PokerState) -> list[Player]:
+    """Pay out the pot, including side pots, and return the winners best hand first."""
+    shares, ranks = pot_shares(game.players, game.community_cards, game.pot)
+    by_seat = {p.seat: p for p in game.players}
+    for seat, amount in shares.items():
+        player = by_seat[seat]
+        player.chips += amount
+        game.pot -= amount
+        if ranks:
+            logger.info("Player %s wins $%s with %s", seat, amount, hand_name(ranks[seat]))
+        else:
+            logger.info("Player %s wins $%s (everyone else folded)", seat, amount)
+
+    winners = [by_seat[seat] for seat in shares]
+    if ranks:
+        winners.sort(key=lambda p: ranks[p.seat], reverse=True)
+    return winners
+
+
+def pot_shares(players: list[Player], board: list[Card], pot: int) -> tuple[dict[int, int], dict[int, tuple]]:
+    """Work out who wins how much of `pot` without changing any state.
+
+    Each player's `committed` total defines the side-pot layers: a layer is
+    contested only by the live players who put at least that much in. Returns
+    ({seat: chips won}, {seat: hand rank}); ranks are empty when nobody showed down.
     """
-    Manages showdown logic including pot resolution and winner determination.
-    """
-    
-    def __init__(self, game: PokerState, action_providers: Optional[Dict] = None):
-        """
-        Initialize the ShowdownManager.
-        
-        Args:
-            game: The PokerState game object
-            action_providers: Optional dict for determining if console output should be printed
-        """
-        self.game = game
-        self.action_providers = action_providers
-    
-    def execute_showdown(self) -> list:
-        """
-        Resolve the showdown: determine winner(s) and award pot.
+    contenders = [p for p in players if p.in_hand]
+    if not contenders:
+        raise ValueError("No active players to award the pot to")
+    if len(contenders) == 1:
+        return {contenders[0].seat: pot}, {}
 
-        If only one non-folded player remains, award the entire pot to them.
-        Otherwise use the external `showdown` and `award_pot` helpers.
-        Returns list of winner Player objects.
-        """
-        # Active players who haven't folded
-        active_players = [p for p in self.game.players if not p.folded]
-
-        # If only one active player, award pot immediately
-        if len(active_players) == 1:
-            winner = active_players[0]
-            # If pot was already awarded earlier (e.g., during betting), skip re-awarding/printing
-            if getattr(self.game, '_pot_awarded', False):
-                return [winner]
-
-            pot_total = self.game.pot.total()
-            if pot_total > 0:
-                try:
-                    self.game.pot.transfer_to(winner.chips, pot_total)
-                except Exception as e:
-                    print(f"Error awarding pot to Player {winner.player_num}: {e}")
-            if self.action_providers is None:
-                print(f"Player {winner.player_num} wins ${pot_total} (everyone else folded)")
-            return [winner]
-
-        # Multiple active players: check if we have enough cards to evaluate
-        total_cards = sum(len(p.hand) for p in active_players) + len(self.game.community_cards)
-        if total_cards < 5:
-            # Not enough cards for hand evaluation (cards haven't been dealt yet)
-            # Award pot equally to all active players
-            pot_total = self.game.pot.total()
-            share = pot_total // len(active_players)
-            remainder = pot_total % len(active_players)
-            for i, player in enumerate(active_players):
-                amount = share + (1 if i < remainder else 0)
-                if amount > 0:
-                    self.game.pot.transfer_to(player.chips, amount)
-            if self.action_providers is None:
-                print(f"Not enough cards for showdown; pot split among {len(active_players)} players")
-            return active_players
-
-        # Multiple active players: evaluate hands and award pot
-        ranked = showdown(self.game)
-        winners = award_pot(self.game, ranked)
-        return winners
-
-
-def showdown(game) -> list:
-    """
-    Evaluate all active players' hands and return ranked winners.
-    
-    Args:
-        game: PokerState object with players and community cards
-        
-    Returns:
-        List of (player, hand_rank, hand_name) tuples, sorted from best to worst
-    """
-    # Get all players who haven't folded
-    active_players = [p for p in game.players if not p.folded]
-    
-    if len(active_players) == 0:
-        raise ValueError("No active players for showdown")
-    
-    # Evaluate each player's hand
-    player_results = []
-    for player in active_players:
-        # Combine player's hole cards with community cards
-        full_hand = player.hand + game.community_cards
-        hand_rank = evaluate_hand(full_hand)
-        player_results.append((player, hand_rank, hand_name(hand_rank)))
-    
-    # Sort by hand rank (best first)
-    player_results.sort(key=lambda x: x[1], reverse=True)
-    
-    return player_results
-
-
-def award_pot(game, ranked_results: list):
-    """
-    Award the pot to the winner(s) based on showdown results.
-    Handles split pots for ties and side pots for all-in players.
-    
-    Args:
-        game: PokerState object
-        ranked_results: Output from showdown() function
-    """
-    if not ranked_results:
-        raise ValueError("No players to award pot to")
-
-    committed = {p.player_num: getattr(p, "committed", 0) for p in game.players}
-    if sum(committed.values()) <= 0:
-        return _award_single_pot(game, ranked_results, game.pot.total())
-
-    rank_by_player = {player.player_num: (player, hand_rank, hand_name_str)
-                      for player, hand_rank, hand_name_str in ranked_results}
-    levels = sorted({amount for amount in committed.values() if amount > 0})
+    ranks = {p.seat: evaluate_hand(p.hand + board) for p in contenders}
+    shares: dict[int, int] = {}
+    remaining = pot
     previous = 0
-    all_winner_nums = []
+    carry = 0
 
-    for level in levels:
-        contributors = [p for p in game.players if committed[p.player_num] >= level]
-        pot_amount = (level - previous) * len(contributors)
+    for level in sorted({p.committed for p in players if p.committed > 0}):
+        contributors = [p for p in players if p.committed >= level]
+        layer = (level - previous) * len(contributors) + carry
         previous = level
-
-        eligible = [p for p in contributors if not p.folded and p.player_num in rank_by_player]
-        if not eligible or pot_amount <= 0:
+        eligible = [p for p in contributors if p.in_hand]
+        if not eligible:
+            carry = layer
             continue
+        carry = 0
+        layer = min(layer, remaining)
+        remaining -= layer
+        _split(shares, eligible, ranks, layer)
 
-        remaining_pot = game.pot.total()
-        if remaining_pot <= 0:
-            break
-        pot_amount = min(pot_amount, remaining_pot)
-
-        best_rank = max(rank_by_player[p.player_num][1] for p in eligible)
-        winners = [rank_by_player[p.player_num] for p in eligible
-                   if rank_by_player[p.player_num][1] == best_rank]
-        all_winner_nums.extend(player.player_num for player, _, _ in winners)
-        _pay_winners(game, winners, pot_amount)
-
-    if game.pot.total() > 0:
-        # Defensive fallback for legacy states where committed chips do not exactly
-        # describe the pot. Award the residual to the best active ranked hand.
-        _award_single_pot(game, ranked_results, game.pot.total())
-
-    seen = set()
-    ordered_winners = []
-    for player, _, _ in ranked_results:
-        if player.player_num in all_winner_nums and player.player_num not in seen:
-            ordered_winners.append(player)
-            seen.add(player.player_num)
-    return ordered_winners or [ranked_results[0][0]]
+    if remaining > 0:
+        # Folded money above every live player's commitment goes to the best live hand.
+        _split(shares, contenders, ranks, remaining)
+    return shares, ranks
 
 
-def _award_single_pot(game, ranked_results: list, pot_total: int):
-    best_hand_rank = ranked_results[0][1]
-    winners = [result for result in ranked_results if result[1] == best_hand_rank]
-    _pay_winners(game, winners, pot_total)
-    return [player for player, _, _ in winners]
+def _split(shares: dict[int, int], eligible: list[Player], ranks: dict[int, tuple], amount: int) -> None:
+    best = max(ranks[p.seat] for p in eligible)
+    winners = [p for p in eligible if ranks[p.seat] == best]
+    share, remainder = divmod(amount, len(winners))
+    for i, player in enumerate(winners):
+        shares[player.seat] = shares.get(player.seat, 0) + share + (1 if i < remainder else 0)
 
-
-def _pay_winners(game, winners: list, pot_total: int) -> None:
-    if pot_total <= 0:
-        return
-
-    pot_share = pot_total // len(winners)
-    remainder = pot_total % len(winners)
-
-    for i, (player, hand_rank, hand_name_str) in enumerate(winners):
-        amount = pot_share + (1 if i < remainder else 0)
-        game.pot.transfer_to(player.chips, amount)
-        print(f"Player {player.player_num} wins ${amount} with {hand_name_str}")
 
 def evaluate_hand(cards: list[Card]) -> tuple:
-    """
-    Evaluate the best 5-card poker hand from given cards.
-    Returns a tuple for comparison where higher is better.
-    
+    """Rank the best 5-card hand within `cards` (5 to 7 cards). Higher tuples are better.
+
     Returns: (hand_type, *tiebreakers)
-    Hand types: 9=Straight Flush, 8=Four of a Kind, 7=Full House, 
-                6=Flush, 5=Straight, 4=Three of a Kind, 3=Two Pair, 
+    Hand types: 9=Straight Flush, 8=Four of a Kind, 7=Full House,
+                6=Flush, 5=Straight, 4=Three of a Kind, 3=Two Pair,
                 2=One Pair, 1=High Card
     """
     if len(cards) < 5:
         raise ValueError("Need at least 5 cards to evaluate")
-    
-    # Get all possible 5-card combinations and find the best
-    from itertools import combinations
-    best_hand = None
-    
-    for five_cards in combinations(cards, 5):
-        hand_value = _evaluate_five_cards(list(five_cards))
-        if best_hand is None or hand_value > best_hand:
-            best_hand = hand_value
-    
-    return best_hand
+
+    rank_counts = Counter(card.rank.value for card in cards)
+    by_suit: dict = {}
+    for card in cards:
+        by_suit.setdefault(card.suit, []).append(card.rank.value)
+    flush = next((sorted(ranks, reverse=True) for ranks in by_suit.values() if len(ranks) >= 5), None)
+
+    if flush:
+        straight_flush = straight_high(flush)
+        if straight_flush:
+            return (9, straight_flush)
+
+    distinct = sorted(rank_counts, reverse=True)
+    quads = [r for r in distinct if rank_counts[r] == 4]
+    trips = [r for r in distinct if rank_counts[r] == 3]
+    pairs = [r for r in distinct if rank_counts[r] == 2]
+
+    if quads:
+        return (8, quads[0], max(r for r in distinct if r != quads[0]))
+    if trips and (len(trips) > 1 or pairs):
+        return (7, trips[0], max(trips[1:] + pairs))
+    if flush:
+        return (6, *flush[:5])
+    straight = straight_high(distinct)
+    if straight:
+        return (5, straight)
+    if trips:
+        return (4, trips[0], *[r for r in distinct if r != trips[0]][:2])
+    if len(pairs) >= 2:
+        return (3, pairs[0], pairs[1], max(r for r in distinct if r not in pairs[:2]))
+    if pairs:
+        return (2, pairs[0], *[r for r in distinct if r != pairs[0]][:3])
+    return (1, *distinct[:5])
 
 
-def _evaluate_five_cards(cards: list[Card]) -> tuple:
-    """Evaluate exactly 5 cards and return their rank."""
-    ranks = sorted([card.rank.value for card in cards], reverse=True)
-    suits = [card.suit for card in cards]
-    rank_counts = Counter(ranks)
-    
-    is_flush = len(set(suits)) == 1
-    is_straight = _is_straight(ranks)
-    
-    # Count rank frequencies
-    counts = sorted(rank_counts.values(), reverse=True)
-    unique_ranks = sorted(rank_counts.keys(), key=lambda r: (rank_counts[r], r), reverse=True)
-    
-    # Straight Flush
-    if is_straight and is_flush:
-        return (9, max(ranks))
-    
-    # Four of a Kind
-    if counts == [4, 1]:
-        four_kind = [r for r, c in rank_counts.items() if c == 4][0]
-        kicker = [r for r, c in rank_counts.items() if c == 1][0]
-        return (8, four_kind, kicker)
-    
-    # Full House
-    if counts == [3, 2]:
-        three_kind = [r for r, c in rank_counts.items() if c == 3][0]
-        pair = [r for r, c in rank_counts.items() if c == 2][0]
-        return (7, three_kind, pair)
-    
-    # Flush
-    if is_flush:
-        return (6, *ranks)
-    
-    # Straight
-    if is_straight:
-        return (5, max(ranks))
-    
-    # Three of a Kind
-    if counts == [3, 1, 1]:
-        three_kind = [r for r, c in rank_counts.items() if c == 3][0]
-        kickers = sorted([r for r, c in rank_counts.items() if c == 1], reverse=True)
-        return (4, three_kind, *kickers)
-    
-    # Two Pair
-    if counts == [2, 2, 1]:
-        pairs = sorted([r for r, c in rank_counts.items() if c == 2], reverse=True)
-        kicker = [r for r, c in rank_counts.items() if c == 1][0]
-        return (3, pairs[0], pairs[1], kicker)
-    
-    # One Pair
-    if counts == [2, 1, 1, 1]:
-        pair = [r for r, c in rank_counts.items() if c == 2][0]
-        kickers = sorted([r for r, c in rank_counts.items() if c == 1], reverse=True)
-        return (2, pair, *kickers)
-    
-    # High Card
-    return (1, *ranks)
+def best_five(cards: list[Card]) -> list[Card]:
+    """The five cards that make the best hand within `cards`, grouped the way you'd read them:
+    sets first (bigger, then higher), so two pair comes out 9 9 6 6 K rather than 6 9 6 9 K."""
+    five = max(combinations(cards, 5), key=lambda five: evaluate_hand(list(five)))
+    counts = Counter(card.rank.value for card in five)
+    rank = evaluate_hand(list(five))
+    if rank[0] in (5, 9) and rank[1] == 5:
+        # The wheel plays its ace low.
+        return sorted(five, key=lambda card: card.rank.value % 14, reverse=True)
+    return sorted(five, key=lambda card: (counts[card.rank.value], card.rank.value), reverse=True)
 
 
-def _is_straight(ranks: list[int]) -> bool:
-    """Check if ranks form a straight."""
-    ranks_sorted = sorted(ranks)
-    
-    # Check regular straight
-    if ranks_sorted == list(range(ranks_sorted[0], ranks_sorted[0] + 5)):
-        return True
-    
-    # Check for A-2-3-4-5 (wheel) straight
-    if ranks_sorted == [2, 3, 4, 5, 14]:
-        return True
-    
-    return False
+def straight_high(ranks) -> int | None:
+    """Return the high card of the best straight in `ranks`, or None. The wheel (A-2-3-4-5) is 5-high."""
+    mask = 0
+    for rank in ranks:
+        mask |= 1 << rank
+    if mask & (1 << 14):
+        mask |= 1 << 1
+    for high in range(14, 4, -1):
+        window = 0b11111 << (high - 4)
+        if mask & window == window:
+            return high
+    return None
+
+
+HAND_NAMES = {
+    9: "Straight Flush",
+    8: "Four of a Kind",
+    7: "Full House",
+    6: "Flush",
+    5: "Straight",
+    4: "Three of a Kind",
+    3: "Two Pair",
+    2: "One Pair",
+    1: "High Card",
+}
 
 
 def hand_name(hand_rank: tuple) -> str:
-    """Convert hand rank tuple to readable name."""
-    hand_type = hand_rank[0]
-    
-    names = {
-        9: "Straight Flush",
-        8: "Four of a Kind",
-        7: "Full House",
-        6: "Flush",
-        5: "Straight",
-        4: "Three of a Kind",
-        3: "Two Pair",
-        2: "One Pair",
-        1: "High Card"
-    }
-    
-    return names.get(hand_type, "Unknown")
+    return HAND_NAMES.get(hand_rank[0], "Unknown")
 
+
+RANK_NAMES = {
+    2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven", 8: "Eight",
+    9: "Nine", 10: "Ten", 11: "Jack", 12: "Queen", 13: "King", 14: "Ace",
+}
+# How many leading tiebreakers are part of the hand itself (the rest are kickers).
+MADE_RANKS = {9: 1, 8: 1, 7: 2, 6: 1, 5: 1, 4: 1, 3: 2, 2: 1, 1: 1}
+
+
+def _plural(rank: int) -> str:
+    return "Sixes" if rank == 6 else f"{RANK_NAMES[rank]}s"
+
+
+def describe_hand(hand_rank: tuple) -> str:
+    """Name a hand with its ranks, e.g. 'Three of a Kind, Sevens' or 'Full House, Kings full of Fives'."""
+    kind, *ranks = hand_rank
+    if kind == 9:
+        return "Royal Flush" if ranks[0] == 14 else f"Straight Flush, {RANK_NAMES[ranks[0]]} high"
+    if kind == 8:
+        return f"Four of a Kind, {_plural(ranks[0])}"
+    if kind == 7:
+        return f"Full House, {_plural(ranks[0])} full of {_plural(ranks[1])}"
+    if kind in (6, 5, 1):
+        return f"{HAND_NAMES[kind]}, {RANK_NAMES[ranks[0]]} high"
+    if kind == 4:
+        return f"Three of a Kind, {_plural(ranks[0])}"
+    if kind == 3:
+        return f"Two Pair, {_plural(ranks[0])} and {_plural(ranks[1])}"
+    return f"One Pair, {_plural(ranks[0])}"
+
+
+def kicker_decided(winner: tuple, loser: tuple) -> str | None:
+    """When two hands of the same kind are separated only by a kicker, name it ('Ace kicker'); otherwise None."""
+    if winner[0] != loser[0] or winner == loser:
+        return None
+    first_difference = next(i for i, (a, b) in enumerate(zip(winner, loser)) if a != b)
+    if first_difference <= MADE_RANKS[winner[0]]:
+        return None
+    return f"{RANK_NAMES[winner[first_difference]]} kicker"

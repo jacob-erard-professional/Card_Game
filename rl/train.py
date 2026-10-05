@@ -1,175 +1,177 @@
+"""Train one NFSP bot per table size by self-play in sit-and-go tournaments.
+
+    python -m rl.train --players 2 3 4 5 --hands 300000
+    python -m rl.train --players 5 --hands 400000 --resume   # carries on up to 400k total
+
+Every seat at the table is played by the same agent (shared weights), so each
+hand produces training data from every seat.
+"""
 from __future__ import annotations
 
 import argparse
 import random
-from dataclasses import dataclass
+import time
+from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
+import torch
 
-from rl.dqn import DQN, ReplayBuffer, Transition, make_optimizer, select_action, torch, train_batch
-from rl.encoding import observation_size
-from rl.environment import PokerRLEnv
-
-
-@dataclass
-class EvalResult:
-    episodes: int
-    avg_reward: float
-    win_rate: float
+from providers import call_provider, random_choice_provider
+from rl.actions import action_from_index, legal_action_mask
+from rl.encoding import observation_size, observation_vector
+from rl.nfsp import AVERAGE, BEST_RESPONSE, NFSPAgent, NFSPConfig, resolve_device
+from rl.policy import CHECKPOINT_DIR, PolicyBot, checkpoint_path
+from rl.tournament import Tournament, TournamentConfig
 
 
-def evaluate(policy: DQN, episodes: int, num_players: int, max_players: int, blind_amount: int) -> EvalResult:
-    wins = 0
-    total_reward = 0.0
-    env = PokerRLEnv(
-        num_players=num_players,
-        blind_amount=blind_amount,
-        max_players=max_players,
-        quiet=True,
-    )
+def play_training_hand(tournament: Tournament, agent: NFSPAgent, epsilon: float) -> int:
+    """Play one self-play hand, feeding both buffers. Returns the number of decisions made."""
+    if tournament.finished:
+        tournament.reset()
+    tournament.start_hand()
+    engine = tournament.engine
+    payouts = tournament.config.payouts
+    modes = {
+        p.seat: BEST_RESPONSE if agent.rng.random() < agent.config.eta else AVERAGE
+        for p in engine.game.players
+    }
+    pending: dict[int, tuple[np.ndarray, int]] = {}
+    decisions = 0
 
-    for _ in range(episodes):
-        state, mask = env.reset()
-        done = env.engine.hand_over
-        reward = (
-            env.engine.chip_deltas().get(env.controlled_player, 0) / max(1, blind_amount)
-            if done else 0.0
-        )
-        while not done:
-            action = select_action(policy, state, mask, epsilon=0.0)
-            result = env.step(action)
-            state = result.observation
-            mask = result.mask
-            done = result.terminal
-            reward = result.reward
-        total_reward += reward
-        wins += int(reward > 0)
+    while not engine.hand_over:
+        seat = engine.current_actor
+        obs = observation_vector(engine, seat, payouts)
+        mask = legal_action_mask(engine)
+        if seat in pending:
+            prev_obs, prev_action = pending[seat]
+            agent.record_rl(prev_obs, prev_action, 0.0, obs, mask, False)
 
-    return EvalResult(
-        episodes=episodes,
-        avg_reward=total_reward / max(1, episodes),
-        win_rate=wins / max(1, episodes),
-    )
+        action = agent.act(obs, mask, modes[seat], epsilon)
+        if modes[seat] == BEST_RESPONSE:
+            agent.record_sl(obs, action, mask)
+        pending[seat] = (obs, action)
+        engine.step(action_from_index(engine, action))
+        decisions += 1
+
+    rewards = tournament.finish_hand()
+    for seat, (obs, action) in pending.items():
+        agent.record_rl(obs, action, rewards[seat], None, None, True)
+    return decisions
+
+
+def evaluate(bot: PolicyBot, num_players: int, opponent, tournaments: int, seed: int) -> float:
+    """Average prize share the bot wins in seat 0 against `opponent` in every other seat."""
+    rng = random.Random(seed)
+    total = 0.0
+    for _ in range(tournaments):
+        tournament = Tournament(TournamentConfig(num_players=num_players), rng)
+        engine = tournament.engine
+        engine.set_global_action_provider(opponent)
+        engine.set_action_provider(0, bot)
+        while not tournament.finished:
+            tournament.start_hand()
+            while not engine.hand_over:
+                player = engine.game.players[engine.current_actor]
+                engine.step(engine.action_providers[player.seat](engine, player))
+            tournament.finish_hand()
+        total += tournament.results()[0]
+    return total / tournaments
+
+
+def save(agent: NFSPAgent, num_players: int, payouts: list[float], hands: int) -> None:
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "num_players": num_players,
+        "obs_size": agent.obs_size,
+        "hidden": agent.config.hidden,
+        "payouts": payouts,
+        "hands_trained": hands,
+    }
+    policy = {k: v.detach().cpu() for k, v in agent.pi.state_dict().items()}
+    torch.save({"meta": meta, "policy": policy}, checkpoint_path(num_players))
+    torch.save({**agent.training_state(), "meta": meta}, training_path(num_players))
+
+
+def training_path(num_players: int) -> Path:
+    return CHECKPOINT_DIR / f"rl_{num_players}p.train.pt"
 
 
 def train(
-    episodes: int,
-    output: str,
-    num_players: int = 2,
-    max_players: int = 6,
-    batch_size: int = 64,
-    target_sync: int = 250,
-    eval_interval: int = 250,
-    eval_episodes: int = 100,
-    blind_amount: int = 20,
-    seed: int | None = None,
-) -> None:
-    if torch is None:
-        raise ImportError("PyTorch is required for training. Install torch first.")
+    num_players: int,
+    hands: int,
+    config: NFSPConfig,
+    device: torch.device,
+    eval_every: int,
+    eval_tournaments: int,
+    resume: bool,
+    seed: int,
+) -> NFSPAgent:
+    """Train up to `hands` in total; a resumed run picks up where the checkpoint left off,
+    so the exploration schedule is the same as if training had never stopped."""
+    agent = NFSPAgent(observation_size(num_players), config, device, seed)
+    hands_done = 0
+    if resume and training_path(num_players).exists():
+        state = torch.load(training_path(num_players), map_location=device)
+        agent.load_training_state(state)
+        hands_done = state["meta"]["hands_trained"]
+        print(f"[{num_players}p] resumed from {hands_done} hands")
 
-    if seed is not None:
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+    # Offset the seeds by progress so a resumed run doesn't replay the same deals.
+    random.seed(seed + hands_done)
+    torch.manual_seed(seed + hands_done)
+    tournament = Tournament(TournamentConfig(num_players=num_players), random.Random(seed + hands_done))
+    payouts = tournament.config.payouts
+    target = hands
+    print(f"[{num_players}p] training {max(0, target - hands_done)} hands (to {target}) on {device} | {asdict(config)}")
+    started = time.time()
+    window_start, window_decisions = time.time(), 0
 
-    env = PokerRLEnv(
-        num_players=num_players,
-        blind_amount=blind_amount,
-        max_players=max_players,
-        quiet=True,
-    )
-    input_size = observation_size(max_players)
-    policy = DQN(input_size)
-    target = DQN(input_size)
-    target.load_state_dict(policy.state_dict())
-    optimizer = make_optimizer(policy)
-    replay = ReplayBuffer(capacity=50000)
+    while hands_done < target:
+        progress = hands_done / target
+        epsilon = config.epsilon_start + (config.epsilon_end - config.epsilon_start) * min(1.0, progress / 0.6)
+        window_decisions += play_training_hand(tournament, agent, epsilon)
+        hands_done += 1
 
-    steps = 0
-    rewards_window: list[float] = []
-    losses_window: list[float] = []
-    action_counts = [0] * 5
-
-    print(f"training episodes={episodes} output={output}")
-    for episode in range(1, episodes + 1):
-        state, mask = env.reset()
-        done = env.engine.hand_over
-        epsilon = max(0.05, 1.0 - episode / max(1, episodes * 0.75))
-        final_reward = (
-            env.engine.chip_deltas().get(env.controlled_player, 0) / max(1, blind_amount)
-            if done else 0.0
-        )
-
-        while not done:
-            action = select_action(policy, state, mask, epsilon)
-            action_counts[action] += 1
-            result = env.step(action)
-            replay.push(Transition(
-                state=state,
-                action=action,
-                reward=result.reward,
-                next_state=result.observation,
-                done=result.terminal,
-                next_mask=result.mask,
-            ))
-            state = result.observation
-            mask = result.mask
-            done = result.terminal
-            final_reward = result.reward
-            steps += 1
-
-            if len(replay) >= batch_size:
-                loss = train_batch(policy, target, optimizer, replay.sample(batch_size))
-                losses_window.append(loss)
-                if len(losses_window) > 200:
-                    losses_window.pop(0)
-
-            if steps % target_sync == 0:
-                target.load_state_dict(policy.state_dict())
-
-        rewards_window.append(final_reward)
-        if len(rewards_window) > 200:
-            rewards_window.pop(0)
-
-        if episode == 1 or episode % eval_interval == 0 or episode == episodes:
-            avg_reward = sum(rewards_window) / max(1, len(rewards_window))
-            avg_loss = sum(losses_window) / max(1, len(losses_window)) if losses_window else 0.0
-            eval_result = evaluate(policy, eval_episodes, num_players, max_players, blind_amount)
+        if hands_done % eval_every == 0 or hands_done == target:
+            save(agent, num_players, payouts, hands_done)
+            bot = PolicyBot.load(checkpoint_path(num_players), seed=seed)
+            fair = 1.0 / num_players
+            vs_random = evaluate(bot, num_players, random_choice_provider, eval_tournaments, seed)
+            vs_caller = evaluate(bot, num_players, call_provider, eval_tournaments, seed + 1)
+            elapsed = time.time() - window_start
+            stats = getattr(agent, "last_stats", {})
             print(
-                f"episode={episode:>6} steps={steps:>7} epsilon={epsilon:.3f} "
-                f"train_avg_reward={avg_reward:+.3f} loss={avg_loss:.4f} "
-                f"eval_avg_reward={eval_result.avg_reward:+.3f} "
-                f"eval_win_rate={eval_result.win_rate:.1%} "
-                f"actions={action_counts}"
+                f"[{num_players}p] hands={hands_done:>8} "
+                f"decisions/s={window_decisions / elapsed:7.0f} eps={epsilon:.3f} "
+                f"q_loss={stats.get('q_loss', float('nan')):.4f} pi_loss={stats.get('pi_loss', float('nan')):.4f} "
+                f"prize share vs random={vs_random:.3f} vs caller={vs_caller:.3f} (fair={fair:.3f}) "
+                f"elapsed={(time.time() - started) / 60:.1f}m",
+                flush=True,
             )
-
-    torch.save(policy.state_dict(), output)
-    print(f"saved {output}")
+            window_start, window_decisions = time.time(), 0
+    return agent
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--episodes", type=int, default=2000)
-    parser.add_argument("--output", default="rl_model.pt")
-    parser.add_argument("--players", type=int, default=2)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--target-sync", type=int, default=250)
-    parser.add_argument("--eval-interval", type=int, default=250)
-    parser.add_argument("--eval-episodes", type=int, default=100)
-    parser.add_argument("--blind", type=int, default=20)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--players", type=int, nargs="+", default=[2, 3, 4, 5], choices=[2, 3, 4, 5])
+    parser.add_argument("--hands", type=int, default=300_000, help="total hands to train each table size to (a resumed run trains the remainder)")
+    parser.add_argument("--device", default="auto", help="auto, cpu, mps or cuda; auto prefers mps then cuda")
+    parser.add_argument("--hidden", type=int, default=NFSPConfig.hidden)
+    parser.add_argument("--batch-size", type=int, default=NFSPConfig.batch_size)
+    parser.add_argument("--eval-every", type=int, default=10_000)
+    parser.add_argument("--eval-tournaments", type=int, default=100)
+    parser.add_argument("--resume", action="store_true", help="continue from rl/checkpoints/rl_<n>p.train.pt")
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--threads", type=int, default=2, help="CPU threads for acting; keep low when running several trainers")
     args = parser.parse_args()
-    train(
-        episodes=args.episodes,
-        output=args.output,
-        num_players=args.players,
-        batch_size=args.batch_size,
-        target_sync=args.target_sync,
-        eval_interval=args.eval_interval,
-        eval_episodes=args.eval_episodes,
-        blind_amount=args.blind,
-        seed=args.seed,
-    )
+    torch.set_num_threads(args.threads)
+
+    device = resolve_device(args.device)
+    config = NFSPConfig(hidden=args.hidden, batch_size=args.batch_size)
+    for num_players in args.players:
+        train(num_players, args.hands, config, device, args.eval_every, args.eval_tournaments, args.resume, args.seed)
 
 
 if __name__ == "__main__":
